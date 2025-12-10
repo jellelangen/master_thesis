@@ -13,7 +13,7 @@ def compute_intrinsic_dim(model, X_scalar, pos_enc, eps=0.1):
         x = pos_enc.unsqueeze(0).repeat(N, 1, 1)  # [N, L, d_model]
         x[:, :, 0] = X_scalar                     # insert sin signal in dim 0
         y_pred, h, attn_weights = model(x, return_attn=True)
-
+    print(f"h.shape: {h.shape}\n attn_weights.shape: {attn_weights.shape}")
     # attn_weights: [N, n_heads, L, L]
     last_idx = L - 1
 

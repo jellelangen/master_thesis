@@ -6,6 +6,8 @@ from scipy.stats import spearmanr, pearsonr
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+
+
 from architectures.transformers import OneBlockTransformer, ThreeBlockTransformer, SinusoidalPosEncoding
 from architectures.utils import compute_intrinsic_dim
 from architectures.transformers import SinusoidalPosEncoding
@@ -27,7 +29,7 @@ def train_one_block(L=10, n_heads=1, head_dim=8,
                     d_hidden=128, n_steps=3000, lr=1e-3):
     d_model = n_heads * head_dim
 
-    X_scalar, y = build_dataset(T=1000, L=L)
+    X_scalar, y = build_dataset(T=1000, L=L, domain=(-2*math.pi, 2*math.pi))
     N = X_scalar.shape[0]
     positional_encoder = SinusoidalPosEncoding(L, d_model).to(device)  # [L, d_model]
     pos_enc = positional_encoder.pe  # [L, d_model]
@@ -142,8 +144,7 @@ def run_and_plot(L, n_heads, title_prefix=""):
     id_values, y_pred_from_id = compute_intrinsic_dim(model, X_scalar, pos_enc, eps=0.1)
     abs_err = np.abs(y_true - y_pred_np)
 
-    rho_id, p_id = spearmanr(id_values, abs_err)
-    print(f"L={L}, heads={n_heads}: Spearman(ID, |error|) = {rho_id:.3f}, p={p_id:.3e}")
+    
     # --- Spearman correlation ---
     rho, p_value = spearmanr(counts, mean_abs_err)
 
@@ -154,18 +155,18 @@ def run_and_plot(L, n_heads, title_prefix=""):
     # Update title with correlation
     axs[0].set_title(
         f"{title_prefix} L={L}, heads={n_heads}, regions≈{regions}\n"
-        f"Spearman(counts, |err|) = {rho_id:.3f}"
+        f"Spearman(counts, |err|) = {rho:.3f}, p={p_value:.3e}"
     )
     mask = counts > 0
     rho_act, p_act = spearmanr(counts[mask], mean_abs_err[mask])
-    print(f"active bins: Spearman correlation between region counts and |error|: {rho_act:.3f}, p={p_act:.3e}")
+    
     plt.tight_layout()
-    print(f"Spearman correlation between region counts and |error|: {rho:.3f}, p={p_value:.3e}")
+   
     os.makedirs("figures", exist_ok=True)
     plt.savefig(f"figures/{title_prefix}_L{L}_heads{n_heads}.png", dpi=150)
 
 
-# Examples roughly corresponding to Figure 4
+
 run_and_plot(L=10,  n_heads=1,  title_prefix="Toy 1D transformer")
 run_and_plot(L=10,  n_heads=10, title_prefix="Toy 1D transformer")
 run_and_plot(L=100, n_heads=1,  title_prefix="Toy 1D transformer")
