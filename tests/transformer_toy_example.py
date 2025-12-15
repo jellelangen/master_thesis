@@ -147,7 +147,8 @@ def run_and_plot(L, n_heads, title_prefix=""):
     
     # --- Spearman correlation ---
     rho, p_value = spearmanr(counts, mean_abs_err)
-
+    rho_id, p_id = spearmanr(id_values, abs_err)
+    print(f"Spearman(ID, |err|): rho={rho_id:.3f}, p={p_id:.3e}")
     axs[2].plot(t_idx, abs_err)
     axs[2].set_ylabel("|error|")
     axs[2].set_xlabel("time index (last token)")
