@@ -22,7 +22,6 @@ def compute_intrinsic_dim(model, X_scalar, pos_enc, eps=0.1):
     attn_last = attn_weights[:, :, last_idx, :]
     attn_mean = attn_last.mean().item()
     attn_std  = attn_last.std().item()
-    print("mean:", attn_mean, "std:", attn_std)
     # count tokens with attention > eps over all heads
     # ID = sum_{h,j} 1[Attn(h, last, j) > eps]
     id_per_sample = (attn_last > eps).sum(dim=(-1, -2))  # [N]
