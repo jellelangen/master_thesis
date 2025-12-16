@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
 
@@ -93,3 +94,100 @@ class SinusoidalPosEncoding(nn.Module):
 
     def forward(self, x):
         return x + self.pe[:x.size(1), :]
+
+
+class TinyGatedMLP(nn.Module):
+    """
+    Llama-style gated MLP:
+      h_gate = gate_proj(x)
+      h_up   = up_proj(x)
+      out = down_proj( silu(h_gate) * h_up )
+    We expose gate_proj for feature extraction like Listing 2. :contentReference[oaicite:2]{index=2}
+    """
+    def __init__(self, d_model: int, d_ff: int):
+        super().__init__()
+        self.gate_proj = nn.Linear(d_model, d_ff, bias=False)
+        self.up_proj   = nn.Linear(d_model, d_ff, bias=False)
+        self.down_proj = nn.Linear(d_ff, d_model, bias=False)
+
+    def forward(self, x):
+        g = self.gate_proj(x)
+        u = self.up_proj(x)
+        return self.down_proj(F.silu(g) * u)
+
+class TinySelfAttn(nn.Module):
+    def __init__(self, d_model: int, n_heads: int):
+        super().__init__()
+        assert d_model % n_heads == 0
+        self.n_heads = n_heads
+        self.d_head = d_model // n_heads
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+
+    def forward(self, x):
+        # x: [B,T,D]
+        B, T, D = x.shape
+        qkv = self.qkv(x)  # [B,T,3D]
+        q, k, v = qkv.chunk(3, dim=-1)
+        q = q.view(B, T, self.n_heads, self.d_head).transpose(1, 2)  # [B,H,T,dh]
+        k = k.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        v = v.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+
+        attn = (q @ k.transpose(-2, -1)) / (self.d_head ** 0.5)  # [B,H,T,T]
+        attn = F.softmax(attn, dim=-1)
+        y = attn @ v  # [B,H,T,dh]
+        y = y.transpose(1, 2).contiguous().view(B, T, D)
+        return self.out(y), attn  # return attn for ID experiments later if desired
+
+class TinyBlock(nn.Module):
+    def __init__(self, d_model: int, n_heads: int, d_ff: int):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = TinySelfAttn(d_model, n_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.mlp = TinyGatedMLP(d_model, d_ff)
+
+    def forward(self, x):
+        a, attn = self.attn(self.ln1(x))
+        x = x + a
+        m = self.mlp(self.ln2(x))
+        x = x + m
+        return x, attn
+
+class TinyTransformer2D(nn.Module):
+    """
+    Input: 2D point -> 3-token sequence: [CLS, X(x1), Y(x2)]
+    Output: class logits from CLS.
+    """
+    def __init__(self, d_model=64, n_heads=4, d_ff=256, n_layers=2, n_classes=3):
+        super().__init__()
+        self.d_model = d_model
+        self.cls = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.x_embed = nn.Linear(1, d_model, bias=True)
+        self.y_embed = nn.Linear(1, d_model, bias=True)
+
+        self.blocks = nn.ModuleList([
+            TinyBlock(d_model, n_heads, d_ff) for _ in range(n_layers)
+        ])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, n_classes)
+
+    def forward(self, xy):
+        # xy: [B,2]
+        B = xy.shape[0]
+        x1 = xy[:, 0:1]
+        x2 = xy[:, 1:2]
+        tok_cls = self.cls.expand(B, 1, self.d_model)
+        tok_x = self.x_embed(x1).unsqueeze(1)
+        tok_y = self.y_embed(x2).unsqueeze(1)
+        x = torch.cat([tok_cls, tok_x, tok_y], dim=1)  # [B,3,D]
+
+        attn_all = []
+        for blk in self.blocks:
+            x, attn = blk(x)
+            attn_all.append(attn)
+
+        x = self.ln_f(x)
+        logits = self.head(x[:, 0])  # CLS
+        return logits, attn_all
+
