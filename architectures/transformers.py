@@ -124,20 +124,22 @@ class TinySelfAttn(nn.Module):
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.out = nn.Linear(d_model, d_model, bias=False)
 
-    def forward(self, x):
-        # x: [B,T,D]
+    def forward(self, x, causal: bool = False):
         B, T, D = x.shape
-        qkv = self.qkv(x)  # [B,T,3D]
+        qkv = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
         q = q.view(B, T, self.n_heads, self.d_head).transpose(1, 2)  # [B,H,T,dh]
         k = k.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         v = v.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
 
         attn = (q @ k.transpose(-2, -1)) / (self.d_head ** 0.5)  # [B,H,T,T]
+        if causal:
+            mask = torch.triu(torch.ones(T, T, device=x.device, dtype=torch.bool), diagonal=1)
+            attn = attn.masked_fill(mask[None, None, :, :], float("-inf"))
         attn = F.softmax(attn, dim=-1)
-        y = attn @ v  # [B,H,T,dh]
+        y = attn @ v
         y = y.transpose(1, 2).contiguous().view(B, T, D)
-        return self.out(y), attn  # return attn for ID experiments later if desired
+        return self.out(y), attn
 
 class TinyBlock(nn.Module):
     def __init__(self, d_model: int, n_heads: int, d_ff: int):
@@ -147,12 +149,13 @@ class TinyBlock(nn.Module):
         self.ln2 = nn.LayerNorm(d_model)
         self.mlp = TinyGatedMLP(d_model, d_ff)
 
-    def forward(self, x):
-        a, attn = self.attn(self.ln1(x))
+    def forward(self, x, causal: bool = False):
+        a, attn = self.attn(self.ln1(x), causal=causal)
         x = x + a
         m = self.mlp(self.ln2(x))
         x = x + m
         return x, attn
+
 
 class TinyTransformer2D(nn.Module):
     """
@@ -191,3 +194,56 @@ class TinyTransformer2D(nn.Module):
         logits = self.head(x[:, 0])  # CLS
         return logits, attn_all
 
+class TinySeqTransformer(nn.Module):
+    """
+    Sequence regression:
+      input tokens: y_0..y_{L-1} as scalars -> embed -> transformer -> predict y_L
+    """
+    def __init__(self, d_model=64, n_heads=4, d_ff=256, n_layers=2, max_len=128):
+        super().__init__()
+        self.in_proj = nn.Linear(1, d_model)
+        self.pos_emb = nn.Embedding(max_len, d_model)
+        self.blocks = nn.ModuleList([
+            TinyBlock(d_model, n_heads, d_ff) for _ in range(n_layers)
+        ])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.out = nn.Linear(d_model, 1)  # next value
+
+    def forward(self, x):
+        # x: [B,T,1]
+        B, T, _ = x.shape
+        pos = torch.arange(T, device=x.device)
+        h = self.in_proj(x) + self.pos_emb(pos)[None, :, :]
+        attn_all = []
+        for blk in self.blocks:
+            h, attn = blk(h, causal=True)
+            attn_all.append(attn)
+        h = self.ln_f(h)
+        pred = self.out(h[:, -1, :])  # use last token
+        return pred, attn_all
+
+class TinySeqTransformerFreq(nn.Module):
+    """
+    Input: y_0..y_{L-1} scalars
+    Output: logits over frequency bins
+    """
+    def __init__(self, d_model=64, n_heads=4, d_ff=256, n_layers=2, max_len=128, n_bins=8):
+        super().__init__()
+        self.in_proj = nn.Linear(1, d_model)
+        self.pos_emb = nn.Embedding(max_len, d_model)
+        self.blocks = nn.ModuleList([TinyBlock(d_model, n_heads, d_ff) for _ in range(n_layers)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, n_bins)
+
+    def forward(self, x):
+        # x: [B,T,1]
+        B, T, _ = x.shape
+        pos = torch.arange(T, device=x.device)
+        h = self.in_proj(x) + self.pos_emb(pos)[None, :, :]
+        attn_all = []
+        for blk in self.blocks:
+            h, attn = blk(h, causal=True)
+            attn_all.append(attn)
+        h = self.ln_f(h)
+        logits = self.head(h[:, -1, :])  # last token like "CLS"
+        return logits, attn_all
