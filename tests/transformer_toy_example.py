@@ -155,8 +155,8 @@ def run_and_plot(L, n_heads, title_prefix=""):
 
     # Update title with correlation
     axs[0].set_title(
-        f"{title_prefix} L={L}, heads={n_heads}, regions≈{regions}\n"
-        f"Spearman(counts, |err|) = {rho:.3f}, p={p_value:.3e}"
+        f"{title_prefix} L={L}, heads={n_heads}, regions: {regions}\n"
+        f"Spearman(counts, abs(error)) = {rho:.3f}, p={p_value:.3e}"
     )
     mask = counts > 0
     rho_act, p_act = spearmanr(counts[mask], mean_abs_err[mask])

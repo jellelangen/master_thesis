@@ -41,7 +41,7 @@ def main():
                 acc = (logits.argmax(dim=-1) == yb).float().mean().item()
             pbar.set_description(f"step {step} L={L} loss={loss.item():.4f} acc={acc:.3f}")
 
-    torch.save(model.state_dict(), "ckpt_sine_freq.pt")
+    torch.save(model.state_dict(), "models/ckpt_sine_freq.pt")
     print("saved ckpt_sine_freq.pt")
 
 if __name__ == "__main__":
