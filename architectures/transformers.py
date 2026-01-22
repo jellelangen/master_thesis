@@ -247,3 +247,121 @@ class TinySeqTransformerFreq(nn.Module):
         h = self.ln_f(h)
         logits = self.head(h[:, -1, :])  # last token like "CLS"
         return logits, attn_all
+
+
+class SplineTransformer(nn.Module):
+    """
+    Autoregressive transformer for discrete token sequences.
+    Uses gated MLPs (like Llama) to enable spline feature extraction.
+    
+    For Dyck-k with k bracket types:
+    - vocab_size = 2*k + 1 (PAD=0, open_1..k, close_1..k)
+    
+    Example usage:
+        >>> model = SplineTransformer(vocab_size=5, d_model=64)  # Dyck-2
+        >>> x = torch.randint(1, 5, (batch, seq_len))
+        >>> logits, attn = model(x)  # logits: [B, T, V]
+    """
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int = 64,
+        n_heads: int = 4,
+        d_ff: int = 256,
+        n_layers: int = 2,
+        max_len: int = 128,
+        pad_idx: int = 0,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.pad_idx = pad_idx
+        
+        # Token and position embeddings
+        self.tok_emb = nn.Embedding(vocab_size, d_model, padding_idx=pad_idx)
+        self.pos_emb = nn.Embedding(max_len, d_model)
+        self.drop = nn.Dropout(dropout)
+        
+        # Transformer blocks with gated MLP
+        self.blocks = nn.ModuleList([
+            TinyBlock(d_model, n_heads, d_ff) for _ in range(n_layers)
+        ])
+        
+        # Output
+        self.ln_f = nn.LayerNorm(d_model)
+        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+        
+        # Weight tying (optional but common for LMs)
+        self.lm_head.weight = self.tok_emb.weight
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize weights with small values."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Embedding):
+                nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                if module.padding_idx is not None:
+                    module.weight.data[module.padding_idx].zero_()
+    
+    def forward(self, x, return_hidden: bool = False):
+        """
+        Args:
+            x: [B, T] token indices
+            return_hidden: if True, also return hidden states before LM head
+            
+        Returns:
+            logits: [B, T, vocab_size] next-token logits
+            attn_all: list of attention weights per layer
+            (hidden): [B, T, d_model] if return_hidden=True
+        """
+        B, T = x.shape
+        device = x.device
+        
+        # Embeddings
+        pos = torch.arange(T, device=device)
+        h = self.tok_emb(x) + self.pos_emb(pos)[None, :, :]
+        h = self.drop(h)
+        
+        # Transformer blocks (causal)
+        attn_all = []
+        for blk in self.blocks:
+            h, attn = blk(h, causal=True)
+            attn_all.append(attn)
+        
+        h = self.ln_f(h)
+        logits = self.lm_head(h)  # [B, T, V]
+        
+        if return_hidden:
+            return logits, attn_all, h
+        return logits, attn_all
+    
+    def generate(self, prompt: torch.Tensor, max_new_tokens: int, temperature: float = 1.0):
+        """
+        Autoregressive generation.
+        
+        Args:
+            prompt: [B, T] starting tokens
+            max_new_tokens: number of tokens to generate
+            temperature: sampling temperature (1.0 = normal, <1 = more deterministic)
+            
+        Returns:
+            [B, T + max_new_tokens] generated sequence
+        """
+        self.eval()
+        x = prompt.clone()
+        
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                logits, _ = self(x)
+                next_logits = logits[:, -1, :] / temperature
+                probs = F.softmax(next_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+                x = torch.cat([x, next_token], dim=1)
+        
+        return x
