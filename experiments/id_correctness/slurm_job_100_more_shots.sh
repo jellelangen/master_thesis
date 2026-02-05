@@ -1,14 +1,18 @@
 #!/bin/bash
-#SBATCH --job-name=id_correctness
+#SBATCH --job-name=id_corr_100
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
-#SBATCH --time=01:00:00
-#SBATCH --mem=4G
+#SBATCH --time=04:00:00
+#SBATCH --mem=16G
 #SBATCH --cpus-per-task=1
 #SBATCH --partition=gpushort
 #SBATCH --gres=gpu:1
 
 set -euo pipefail
+
+REPO_ROOT="$HOME/repos/master_thesis"
+cd "$REPO_ROOT"
+mkdir -p logs
 
 echo "=========================================="
 echo "Job started at $(date)"
@@ -16,22 +20,14 @@ echo "Running on host: $(hostname)"
 echo "Job ID: ${SLURM_JOB_ID:-}"
 echo "=========================================="
 
-REPO_ROOT="$HOME/repos/master_thesis"
-cd "$REPO_ROOT"
-echo "Working directory: $(pwd)"
-
 module purge
-
 module load Python/3.9.6-GCCcore-11.2.0
 
-source $HOME/repos/master_thesis/venv/bin/activate
-
-# Ensure repo root is on PYTHONPATH so "experiments" package resolves
+source "$REPO_ROOT/venv/bin/activate"
 export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 
 python -c "import sys; print('Python:', sys.executable)"
 python -c "import torch; print('Torch:', torch.__version__); print('CUDA available:', torch.cuda.is_available())"
-
 
 export HF_HOME="/scratch/$USER/hf"
 export TRANSFORMERS_CACHE="$HF_HOME"
@@ -39,12 +35,15 @@ mkdir -p "$HF_HOME"
 
 python -m experiments.id_correctness.run_experiment \
   --config experiments/id_correctness/config.yaml \
-  --dataset.n_samples 2 \
-  --few_shot.max_shots 1 \
-  --few_shot.shot_step 1 \
+  --dataset.n_samples 100 \
+  --few_shot.max_shots 8 \
+  --few_shot.shot_step 2 \
   --model.name TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
   --model.torch_dtype float16 \
-  --output.dir outputs/smoke
+  --output.dir outputs/medium
+  
+python -m experiments.id_correctness.analyze_results \
+  --results_dir "$(ls -1dt outputs/medium/* | head -1)"
 
 echo "=========================================="
 echo "Job finished at $(date)"

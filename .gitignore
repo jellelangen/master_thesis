@@ -1,5 +1,8 @@
 venv/
+.venv/
 __pycache__/
 figures/
 models/
 results/
+outputs/
+logs/

@@ -25,7 +25,11 @@ from dataclasses import dataclass, asdict
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from experiments.id_correctness.data_loader import GSM8KDataLoader
+from experiments.id_correctness.data_loader import (
+    GSM8KDataLoader,
+    ASDivDataLoader,
+    AddSubDataLoader,
+)
 
 
 @dataclass
@@ -151,13 +155,31 @@ def run_experiment(config: Dict) -> List[ExperimentResult]:
     model.eval()
     
     # Load dataset
-    print("Loading GSM8K dataset...")
-    data_loader = GSM8KDataLoader(
-        subset=config["dataset"].get("subset", "main"),
-        n_samples=config["dataset"].get("n_samples"),
-        seed=seed,
-    )
-    print(f"Loaded {len(data_loader)} test samples")
+    dataset_name = config["dataset"].get("name", "gsm8k")
+    if dataset_name.lower() == "gsm8k":
+        print("Loading GSM8K dataset...")
+        data_loader = GSM8KDataLoader(
+            subset=config["dataset"].get("subset", "main"),
+            n_samples=config["dataset"].get("n_samples"),
+            seed=seed,
+        )
+    elif dataset_name.lower() == "asdiv":
+        print("Loading ASDiv dataset...")
+        data_loader = ASDivDataLoader(
+            split=config["dataset"].get("split", "train"),
+            n_samples=config["dataset"].get("n_samples"),
+            seed=seed,
+        )
+    elif dataset_name.lower() == "addsub":
+        print("Loading AddSub dataset (Lots-of-LoRAs/task861)...")
+        data_loader = AddSubDataLoader(
+            split=config["dataset"].get("split", "test"),
+            n_samples=config["dataset"].get("n_samples"),
+            seed=seed,
+        )
+    else:
+        raise ValueError(f"Unsupported dataset name: {dataset_name}")
+    print(f"Loaded {len(data_loader)} samples")
     
     # Shot configuration
     min_shots = config["few_shot"].get("min_shots", 0)
@@ -174,7 +196,12 @@ def run_experiment(config: Dict) -> List[ExperimentResult]:
     results = []
     
     for sample_idx in tqdm(range(len(data_loader)), desc="Processing samples"):
-        sample = data_loader.test_samples[sample_idx]
+        # Support both GSM8K (uses test_samples) and ASDiv (uses samples)
+        sample = (
+            data_loader.test_samples[sample_idx]
+            if hasattr(data_loader, "test_samples")
+            else data_loader.samples[sample_idx]
+        )
         
         result = ExperimentResult(
             sample_idx=sample_idx,
@@ -196,20 +223,22 @@ def run_experiment(config: Dict) -> List[ExperimentResult]:
             # Tokenize
             inputs = tokenizer(prompt, return_tensors="pt").to(device)
             
-            # Generate with attention outputs
+            # Generate answer
             with torch.no_grad():
                 outputs = model.generate(
                     **inputs,
                     max_new_tokens=256,
                     do_sample=False,  # Greedy for reproducibility
-                    output_attentions=True,
                     return_dict_in_generate=True,
                 )
-                
-                # Get attention weights from forward pass (not generation)
-                # We need to run a forward pass to get attentions
+
+                # Run a forward pass on the FULL sequence (prompt + generated)
+                # so ID is measured at the answer position, matching the paper.
+                full_input_ids = outputs.sequences  # [1, prompt + gen]
+                full_attn_mask = torch.ones_like(full_input_ids, device=device)
                 forward_outputs = model(
-                    **inputs,
+                    input_ids=full_input_ids,
+                    attention_mask=full_attn_mask,
                     output_attentions=True,
                 )
                 attention_weights = forward_outputs.attentions

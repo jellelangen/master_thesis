@@ -12,9 +12,9 @@ model:
 
 # Dataset configuration
 dataset:
-  name: "gsm8k"  # HuggingFace dataset name
-  subset: "main"  # Dataset subset/config
-  split: "test"  # train/test split to evaluate on
+  name: "gsm8k"  # Options: "gsm8k", "asdiv", "addsub"
+  subset: "main"  # GSM8K subset/config (ignored for ASDiv/AddSub)
+  split: "test"  # Evaluation split (ASDiv default train; AddSub supports train/valid/test)
   n_samples: 500  # Number of samples to evaluate (null for all)
 
 # Few-shot configuration
