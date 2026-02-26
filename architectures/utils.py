@@ -89,10 +89,11 @@ def spline_features_cls_softmin(
     # distances for CLS only: d = |h|/||w|| -> [B,K]
     d = h_gate[:, 0, :].abs() / w_norm.view(1, -1)
 
-    # softmin over gates: -tau * logsumexp(-d/tau)
+    # softmin over gates using torch.nn.Softmin (returns weights that sum to 1)
     # note: use clamp_min on tau to avoid divide-by-zero if you pass tau=0
     tau_t = max(float(tau), 1e-8)
-    cls_softmin = -tau_t * torch.logsumexp(-d / tau_t, dim=1)  # [B]
+    softmin_weights = torch.nn.Softmin(dim=1)(d / tau_t)  # [B,K]
+    cls_softmin = (softmin_weights * d).sum(dim=1)  # [B]
 
     # a few robust summaries (often more interpretable than hard min)
     cls_mean = d.mean(dim=1)
@@ -151,7 +152,8 @@ def spline_features_lasttok_softmin(
     d = h_gate[:, -1, :].abs() / w_norm.view(1, -1)     # [B,K]
 
     tau_t = max(float(tau), 1e-8)
-    softmin = -tau_t * torch.logsumexp(-d / tau_t, dim=1)
+    softmin_weights = torch.nn.Softmin(dim=1)(d / tau_t)  # [B,K]
+    softmin = (softmin_weights * d).sum(dim=1)  # [B]
 
     q10 = torch.quantile(d, 0.10, dim=1)
     q50 = torch.quantile(d, 0.50, dim=1)
@@ -163,4 +165,3 @@ def spline_features_lasttok_softmin(
         "q50": q50,
         "sign_density": sign_density,
     }
-

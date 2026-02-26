@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -22,7 +23,7 @@ def main():
     model.train()
     pbar = tqdm(range(steps))
     for step in pbar:
-        y, y_cls, _ = sample_sine_freq_batch(batch_size=batch_size, T=T, n_bins=n_bins, noise_std=0.02)
+        y, y_cls, _ = sample_sine_freq_batch(batch_size=batch_size, T=T, n_bins=n_bins, noise_std=0.0)
         L = int(torch.randint(low=L_min, high=L_max, size=(1,)).item())
         x = make_prefix(y, L=L)
 
@@ -40,7 +41,8 @@ def main():
             with torch.no_grad():
                 acc = (logits.argmax(dim=-1) == yb).float().mean().item()
             pbar.set_description(f"step {step} L={L} loss={loss.item():.4f} acc={acc:.3f}")
-
+    if not os.path.exists("models"):
+        os.makedirs("models")
     torch.save(model.state_dict(), "models/ckpt_sine_freq.pt")
     print("saved ckpt_sine_freq.pt")
 

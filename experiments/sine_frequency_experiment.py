@@ -13,12 +13,12 @@ def main():
     n_bins = 8
 
     model = TinySeqTransformerFreq(d_model=64, n_heads=4, d_ff=512, n_layers=4, max_len=128, n_bins=n_bins).to(device)
-    model.load_state_dict(torch.load("ckpt_sine_freq.pt", map_location=device))
+    model.load_state_dict(torch.load("models/ckpt_sine_freq.pt", map_location=device))
     model.eval()
 
-    B = 2048//4
+    B = 4096//4
     T = 64
-    y, y_cls, _ = sample_sine_freq_batch(batch_size=B, T=T, n_bins=n_bins, noise_std=0.02, seed=0)
+    y, y_cls, _ = sample_sine_freq_batch(batch_size=B, T=T, n_bins=n_bins, noise_std=0.00, seed=0)
 
     Ls = list(range(6, 50, 2))
     accs, q10s, softmins, sds, entropies = [], [], [], [], []
@@ -62,9 +62,9 @@ def main():
     print(f"correlation between acc and sign density: {pearsonr(accs, sds)}")
     print(f"correlation between acc and entropy: {pearsonr(accs, entropies)}")
     plt.figure(figsize=(7,4))
-    plt.plot(Ls, q10s, label="geom q10 (last tok)")
-    plt.plot(Ls, softmins, label="geom softmin (last tok)")
-    plt.plot(Ls, sds, label="geom sign density (last tok)")
+    # plt.plot(Ls, q10s, label="geom q10 (last tok)")
+    # plt.plot(Ls, softmins, label="geom softmin (last tok)")
+    # plt.plot(Ls, sds, label="geom sign density (last tok)")
     plt.plot(Ls, entropies, label="entropy (last tok)")
     plt.xlabel("Prefix length L")
     plt.ylabel("Feature mean")
