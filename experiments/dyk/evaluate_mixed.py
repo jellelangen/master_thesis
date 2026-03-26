@@ -307,11 +307,11 @@ def main():
     
     # Plot
     if args.plot or args.plot_path:
-        fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+        fig, axes = plt.subplots(3, 1, figsize=(12, 9))
         
         # Plot features for selected layer
-        feat_list = ["q10", "softmin", "sign_density"]
-        for ax, feat_name in zip(axes.flat[:3], feat_list):
+        feat_list = ["q10", "softmin"]
+        for ax, feat_name in zip(axes.flat[:2], feat_list):
             means = []
             stds = []
             for nv in unique_nvalid:
@@ -327,15 +327,15 @@ def main():
             stds = np.array(stds)
             
             ax.plot(unique_nvalid, means, marker='o', linewidth=2, markersize=8)
-            ax.fill_between(unique_nvalid, means - stds, means + stds, alpha=0.2)
-            ax.set_xlabel("# valid next tokens")
+            # ax.fill_between(unique_nvalid, means - stds, means + stds, alpha=0.2)
+            ax.set_xlabel("number of valid next tokens")
             ax.set_ylabel(feat_name)
             ax.set_title(f"{feat_name} ({layer_desc})")
             ax.set_xticks(unique_nvalid)
             ax.grid(True, alpha=0.3)
         
         # Entropy plot
-        ax = axes.flat[3]
+        ax = axes.flat[2]
         means = []
         stds = []
         for nv in unique_nvalid:
@@ -348,9 +348,9 @@ def main():
                 stds.append(np.nan)
         means = np.array(means)
         stds = np.array(stds)
-        ax.plot(unique_nvalid, means, marker='o', linewidth=2, markersize=8, color='orange')
-        ax.fill_between(unique_nvalid, means - stds, means + stds, alpha=0.2, color='orange')
-        ax.set_xlabel("# valid next tokens")
+        ax.plot(unique_nvalid, means, marker='o', linewidth=2, markersize=8)
+        # ax.fill_between(unique_nvalid, means - stds, means + stds, alpha=0.2, color='orange')
+        ax.set_xlabel("number of valid next tokens")
         ax.set_ylabel("entropy")
         ax.set_title("Prediction entropy")
         ax.set_xticks(unique_nvalid)

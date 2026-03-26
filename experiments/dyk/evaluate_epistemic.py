@@ -43,7 +43,7 @@ import torch
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
-from scipy.stats import spearmanr, mannwhitneyu
+from scipy.stats import spearmanr, mannwhitneyu, ttest_ind
 import matplotlib.pyplot as plt
 
 from data.dyk import DyckPCFG
@@ -242,7 +242,7 @@ def main():
     print(f"{'='*70}")
     
     print(f"\nFeature comparison (aggregated across layers):")
-    print(f"  {'Feature':15s} | {'ID mean':>10s} | {'ID std':>10s} | {'OOD mean':>10s} | {'OOD std':>10s} | {'p-value':>10s}")
+    print(f"  {'Feature':15s} | {'ID median':>10s} | {'ID std':>10s} | {'OOD median':>10s} | {'OOD std':>10s} | {'p-value':>10s}")
     print(f"  {'-'*15} | {'-'*10} | {'-'*10} | {'-'*10} | {'-'*10} | {'-'*10}")
     
     for feat_name in ["q10", "softmin", "sign_density"]:
@@ -250,19 +250,23 @@ def main():
         ood_vals = ood_features["aggregated"][feat_name]
         
         # Mann-Whitney U test (non-parametric)
-        stat, pval = mannwhitneyu(id_vals, ood_vals, alternative='two-sided')
+        stat, pval = mannwhitneyu(id_vals, ood_vals, alternative='greater')
+        # T-test (parametric)
+        stat_t, pval_t = ttest_ind(id_vals, ood_vals, alternative='greater')
         
-        print(f"  {feat_name:15s} | {id_vals.mean():10.4f} | {id_vals.std():10.4f} | {ood_vals.mean():10.4f} | {ood_vals.std():10.4f} | {pval:10.2e}")
+        print(f"  {feat_name:15s} | {np.median(id_vals):10.4f} | {id_vals.std():10.4f} | {np.median(ood_vals):10.4f} | {ood_vals.std():10.4f} | {pval:10.2e} | stat={stat:.2f} | pval_t={pval_t:10.2e} | stat_t={stat_t:.2f}")
     
     # Entropy
-    stat, pval = mannwhitneyu(id_features["entropy"], ood_features["entropy"], alternative='two-sided')
-    print(f"  {'entropy':15s} | {id_features['entropy'].mean():10.4f} | {id_features['entropy'].std():10.4f} | {ood_features['entropy'].mean():10.4f} | {ood_features['entropy'].std():10.4f} | {pval:10.2e}")
+    stat, pval = mannwhitneyu(id_features["entropy"], ood_features["entropy"], alternative='less')
+    stat_t, pval_t = ttest_ind(id_features["entropy"], ood_features["entropy"], alternative='less')
+    
+    print(f"  {'entropy':15s} | {np.median(id_features['entropy']):10.4f} | {id_features['entropy'].std():10.4f} | {np.median(ood_features['entropy']):10.4f} | {ood_features['entropy'].std():10.4f} | {pval:10.2e} | stat={stat:.2f} | pval_t={pval_t:10.2e} | stat_t={stat_t:.2f}")
     
     # Per-layer analysis
     print(f"\nPer-layer comparison (ID mean → OOD mean):")
     print(f"  {'Layer':<8} | {'q10':>20s} | {'softmin':>20s} | {'sign_density':>20s}")
     print(f"  {'-'*8} | {'-'*20} | {'-'*20} | {'-'*20}")
-    
+
     for l in range(id_features["n_layers"]):
         q10_diff = f"{id_features['per_layer'][l]['q10'].mean():.3f} → {ood_features['per_layer'][l]['q10'].mean():.3f}"
         sm_diff = f"{id_features['per_layer'][l]['softmin'].mean():.3f} → {ood_features['per_layer'][l]['softmin'].mean():.3f}"
@@ -271,9 +275,9 @@ def main():
     
     # Plot
     if args.plot or args.plot_path:
-        fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+        fig, axes = plt.subplots(3, 1, figsize=(12, 9))
         
-        feat_names = ["q10", "softmin", "sign_density", "entropy"]
+        feat_names = ["q10", "softmin", "entropy"]
         colors = {"ID": "tab:blue", "OOD": "tab:red"}
         
         for ax, feat_name in zip(axes.flat, feat_names):
