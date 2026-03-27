@@ -66,8 +66,6 @@ class TinyBlock(nn.Module):
         return x, attn
 
 
-
-
 class TinySeqTransformerFreq(nn.Module):
     """
     Input: y_0..y_{L-1} scalars

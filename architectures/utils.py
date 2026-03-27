@@ -52,3 +52,7 @@ def spline_features_lasttok_softmin(
         "q50": q50,
         "sign_density": sign_density,
     }
+
+@torch.no_grad()
+def create_hulls():
+    pass
