@@ -5,7 +5,7 @@ from scipy.stats import spearmanr, pearsonr
 
 from data.builders import sample_sine_freq_batch, make_prefix
 from architectures.transformers import TinySeqTransformerFreq
-from architectures.utils import attach_gate_hooks, spline_features_lasttok_softmin
+from architectures.utils import attach_gate_hooks, spline_features_lasttok
 
 @torch.no_grad()
 def main():
@@ -13,7 +13,7 @@ def main():
     n_bins = 8
 
     model = TinySeqTransformerFreq(d_model=64, n_heads=4, d_ff=512, n_layers=4, max_len=128, n_bins=n_bins).to(device)
-    model.load_state_dict(torch.load("models/ckpt_sine_freq.pt", map_location=device))
+    model.load_state_dict(torch.load("models/100_steps_ckpt_sine_freq.pt", map_location=device))
     model.eval()
 
     B = 4096//4
@@ -21,7 +21,7 @@ def main():
     y, y_cls, _ = sample_sine_freq_batch(batch_size=B, T=T, n_bins=n_bins, noise_std=0.00, seed=0)
 
     Ls = list(range(6, 50, 2))
-    accs, q10s, softmins, sds, entropies = [], [], [], [], []
+    accs, hardmins, q10s, sds, lcs, entropies = [], [], [], [], [], []
 
     handles, cache = attach_gate_hooks(model)
     layer_idx = len(model.blocks) - 1
@@ -40,11 +40,12 @@ def main():
 
         h_gate = cache[layer_idx]["h_gate"]
         w = model.blocks[layer_idx].mlp.gate_proj.weight.detach()
-        feats = spline_features_lasttok_softmin(h_gate, w, tau=0.05)
+        feats = spline_features_lasttok(h_gate, w, 0.2)
 
+        hardmins.append(feats["hardmin"].mean().item())
         q10s.append(feats["q10"].mean().item())
-        softmins.append(feats["softmin"].mean().item())
         sds.append(feats["sign_density"].mean().item())
+        lcs.append(feats["lc"].mean().item())
 
     for h in handles:
         h.remove()
@@ -57,19 +58,19 @@ def main():
     plt.tight_layout()
     plt.savefig("figures/sine_freq_acc_vs_prefix_length2.png")
     plt.show()
+    print(f"correlation between acc and hardmin: {spearmanr(accs, hardmins)}")
     print(f"correlation between acc and q10: {spearmanr(accs, q10s)}")
-    print(f"correlation between acc and softmin: {pearsonr(accs, softmins)}")
     print(f"correlation between acc and sign density: {pearsonr(accs, sds)}")
+    print(f"correlation between acc and lc: {spearmanr(accs, lcs)}")
     print(f"correlation between acc and entropy: {pearsonr(accs, entropies)}")
-    plt.figure(figsize=(7,4))
-    # plt.plot(Ls, q10s, label="geom q10 (last tok)")
-    # plt.plot(Ls, softmins, label="geom softmin (last tok)")
-    # plt.plot(Ls, sds, label="geom sign density (last tok)")
-    plt.plot(Ls, entropies, label="entropy (last tok)")
-    plt.xlabel("Prefix length L")
-    plt.ylabel("Feature mean")
-    plt.grid(True)
-    plt.legend()
+    fig, axes = plt.subplots(5, 1, figsize=(7, 16))
+    for ax, vals, name in zip(axes, [hardmins, q10s, sds, lcs, entropies],
+                               ["hardmin", "q10", "sign density", "lc", "entropy"]):
+        ax.plot(Ls, vals, marker="o")
+        ax.set_xlabel("Prefix length L")
+        ax.set_ylabel(name)
+        ax.set_title(name)
+        ax.grid(True)
     plt.tight_layout()
     plt.savefig("figures/sine_freq_features_vs_prefix_length2.png")
     plt.show()

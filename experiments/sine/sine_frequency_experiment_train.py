@@ -16,7 +16,7 @@ def main():
     loss_fn = nn.CrossEntropyLoss()
 
     T = 64
-    steps = 100
+    steps = 6000
     batch_size = 256
     L_min, L_max = 6, 48
 

@@ -13,7 +13,7 @@ THEORY:
 
 RELEVANT FILES:
     - experiments/dyk/train.py: Use --mixed --k=8 for training
-    - architectures/utils.py: spline_features_lasttok_softmin function
+    - architectures/utils.py: spline_features_lasttok function
     - experiments/dyk/evaluate_uncertainty.py: Single-k version
 
 CLI ARGUMENTS:
@@ -40,7 +40,7 @@ import matplotlib.pyplot as plt
 
 from data.dyk import DyckPCFG
 from architectures.transformers import SplineTransformer
-from architectures.utils import attach_gate_hooks, spline_features_lasttok_softmin
+from architectures.utils import attach_gate_hooks, spline_features_lasttok
 
 
 def get_valid_next_tokens_for_k(k: int, prefix_str: str, pcfg: DyckPCFG) -> set:
@@ -142,7 +142,7 @@ def extract_spline_features(model, inputs, device, batch_size=64):
     n_layers = len(model.blocks)
     
     # Initialize per-layer storage
-    per_layer = {l: {"q10": [], "softmin": [], "sign_density": []} for l in range(n_layers)}
+    per_layer = {l: {"hardmin": [], "q10": [], "sign_density": [], "lc": []} for l in range(n_layers)}
     all_entropy = []
     
     with torch.no_grad():
@@ -165,11 +165,12 @@ def extract_spline_features(model, inputs, device, batch_size=64):
                 for j, inp in enumerate(batch_inputs):
                     last_pos = len(inp) - 1
                     h_single = h_gate[j:j+1, last_pos:last_pos+1, :]
-                    feats = spline_features_lasttok_softmin(h_single, gate_weight, tau=0.05)
-                    
+                    feats = spline_features_lasttok(h_single, gate_weight, 0.2)
+
+                    per_layer[layer_idx]["hardmin"].append(feats["hardmin"].item())
                     per_layer[layer_idx]["q10"].append(feats["q10"].item())
-                    per_layer[layer_idx]["softmin"].append(feats["softmin"].item())
                     per_layer[layer_idx]["sign_density"].append(feats["sign_density"].item())
+                    per_layer[layer_idx]["lc"].append(feats["lc"].item())
             
             # Entropy from logits (only once per sample)
             for j, inp in enumerate(batch_inputs):
@@ -184,12 +185,12 @@ def extract_spline_features(model, inputs, device, batch_size=64):
     
     # Convert to numpy arrays
     for layer_idx in range(n_layers):
-        for feat_name in ["q10", "softmin", "sign_density"]:
+        for feat_name in ["hardmin", "q10", "sign_density", "lc"]:
             per_layer[layer_idx][feat_name] = np.array(per_layer[layer_idx][feat_name])
-    
+
     # Compute aggregated features (mean across layers)
     aggregated = {}
-    for feat_name in ["q10", "softmin", "sign_density"]:
+    for feat_name in ["hardmin", "q10", "sign_density", "lc"]:
         stacked = np.stack([per_layer[l][feat_name] for l in range(n_layers)], axis=0)  # [n_layers, n_samples]
         aggregated[feat_name] = stacked.mean(axis=0)  # [n_samples]
     
@@ -205,7 +206,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, default="models/dyck8.pt")
     parser.add_argument("--max_k", type=int, default=8, help="Max k for Dyck grammars (samples Dyck-2 to Dyck-max_k)")
-    parser.add_argument("--n_samples_per_k", type=int, default=200)
+    parser.add_argument("--n_samples_per_k", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--seed", type=int, default=54321)
     parser.add_argument("--plot", action="store_true")
@@ -283,7 +284,7 @@ def main():
     
     # Correlations for selected layer/aggregated
     print(f"\nCorrelations with n_valid ({layer_desc}):")
-    for feat_name in ["q10", "softmin", "sign_density"]:
+    for feat_name in ["hardmin", "q10", "sign_density", "lc"]:
         r, p = spearmanr(n_valid, features[feat_name])
         print(f"  {feat_name:15s}: r={r:+.4f} (p={p:.2e})")
     r, p = spearmanr(n_valid, result["entropy"])
@@ -291,70 +292,54 @@ def main():
     
     # Per-layer correlation summary
     print(f"\nPer-layer correlations with n_valid:")
-    print(f"  {'Layer':<8} | {'q10':>10} | {'softmin':>10} | {'sign_density':>12}")
-    print(f"  {'-'*8} | {'-'*10} | {'-'*10} | {'-'*12}")
+    print(f"  {'Layer':<8} | {'hardmin':>10} | {'q10':>10} | {'sign_density':>12} | {'lc':>10}")
+    print(f"  {'-'*8} | {'-'*10} | {'-'*10} | {'-'*12} | {'-'*10}")
     for l in range(n_layers):
         layer_feats = result["per_layer"][l]
+        r_hm, _ = spearmanr(n_valid, layer_feats["hardmin"])
         r_q10, _ = spearmanr(n_valid, layer_feats["q10"])
-        r_sm, _ = spearmanr(n_valid, layer_feats["softmin"])
         r_sd, _ = spearmanr(n_valid, layer_feats["sign_density"])
-        print(f"  Layer {l:<2} | {r_q10:+10.4f} | {r_sm:+10.4f} | {r_sd:+12.4f}")
+        r_lc, _ = spearmanr(n_valid, layer_feats["lc"])
+        print(f"  Layer {l:<2} | {r_hm:+10.4f} | {r_q10:+10.4f} | {r_sd:+12.4f} | {r_lc:+10.4f}")
     # Aggregated
+    r_hm, _ = spearmanr(n_valid, result["aggregated"]["hardmin"])
     r_q10, _ = spearmanr(n_valid, result["aggregated"]["q10"])
-    r_sm, _ = spearmanr(n_valid, result["aggregated"]["softmin"])
     r_sd, _ = spearmanr(n_valid, result["aggregated"]["sign_density"])
-    print(f"  {'Agg':<8} | {r_q10:+10.4f} | {r_sm:+10.4f} | {r_sd:+12.4f}")
+    r_lc, _ = spearmanr(n_valid, result["aggregated"]["lc"])
+    print(f"  {'Agg':<8} | {r_hm:+10.4f} | {r_q10:+10.4f} | {r_sd:+12.4f} | {r_lc:+10.4f}")
     
     # Plot
     if args.plot or args.plot_path:
-        fig, axes = plt.subplots(3, 1, figsize=(12, 9))
-        
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
         # Plot features for selected layer
-        feat_list = ["q10", "softmin"]
-        for ax, feat_name in zip(axes.flat[:2], feat_list):
+        feat_list = ["hardmin", "q10", "lc", "entropy"]
+        for ax, feat_name in zip(axes.flat, feat_list):
+            if feat_name == "entropy":
+                feat_vals = result["entropy"]
+            else:
+                feat_vals = features[feat_name]
+
             means = []
             stds = []
             for nv in unique_nvalid:
                 mask = n_valid == nv
                 if mask.sum() > 0:
-                    means.append(features[feat_name][mask].mean())
-                    stds.append(features[feat_name][mask].std())
+                    means.append(feat_vals[mask].mean())
+                    stds.append(feat_vals[mask].std())
                 else:
                     means.append(np.nan)
                     stds.append(np.nan)
-            
+
             means = np.array(means)
             stds = np.array(stds)
-            
+
             ax.plot(unique_nvalid, means, marker='o', linewidth=2, markersize=8)
-            # ax.fill_between(unique_nvalid, means - stds, means + stds, alpha=0.2)
             ax.set_xlabel("number of valid next tokens")
             ax.set_ylabel(feat_name)
             ax.set_title(f"{feat_name} ({layer_desc})")
             ax.set_xticks(unique_nvalid)
             ax.grid(True, alpha=0.3)
-        
-        # Entropy plot
-        ax = axes.flat[2]
-        means = []
-        stds = []
-        for nv in unique_nvalid:
-            mask = n_valid == nv
-            if mask.sum() > 0:
-                means.append(result["entropy"][mask].mean())
-                stds.append(result["entropy"][mask].std())
-            else:
-                means.append(np.nan)
-                stds.append(np.nan)
-        means = np.array(means)
-        stds = np.array(stds)
-        ax.plot(unique_nvalid, means, marker='o', linewidth=2, markersize=8)
-        # ax.fill_between(unique_nvalid, means - stds, means + stds, alpha=0.2, color='orange')
-        ax.set_xlabel("number of valid next tokens")
-        ax.set_ylabel("entropy")
-        ax.set_title("Prediction entropy")
-        ax.set_xticks(unique_nvalid)
-        ax.grid(True, alpha=0.3)
         
         plt.suptitle(f"Mixed Dyck-2 to Dyck-{args.max_k} ({layer_desc})", fontsize=12, fontweight='bold')
         plt.tight_layout()

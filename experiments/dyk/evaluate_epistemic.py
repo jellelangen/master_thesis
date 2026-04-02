@@ -10,9 +10,10 @@ THEORY:
     If spline features capture epistemic uncertainty, they should differ between ID and OOD.
     
     Features analyzed:
+    - hardmin: Hard minimum distance to hyperplane (distance-based)
     - q10: 10th percentile distance to hyperplane (distance-based)
-    - softmin: Soft minimum distance (distance-based)  
     - sign_density: Fraction of positive activations (activation-based)
+    - lc: Local complexity / number of nearby boundaries (count-based)
     - entropy: Prediction entropy from output logits
 
 RELEVANT FILES:
@@ -48,7 +49,7 @@ import matplotlib.pyplot as plt
 
 from data.dyk import DyckPCFG
 from architectures.transformers import SplineTransformer
-from architectures.utils import attach_gate_hooks, spline_features_lasttok_softmin
+from architectures.utils import attach_gate_hooks, spline_features_lasttok
 
 
 def create_test_samples(pcfg: DyckPCFG, pcfg_tokenizer: DyckPCFG, n_samples: int, 
@@ -96,7 +97,7 @@ def extract_spline_features(model, inputs, device, batch_size=64):
     handles, cache = attach_gate_hooks(model)
     n_layers = len(model.blocks)
     
-    per_layer = {l: {"q10": [], "softmin": [], "sign_density": []} for l in range(n_layers)}
+    per_layer = {l: {"hardmin": [], "q10": [], "sign_density": [], "lc": []} for l in range(n_layers)}
     all_entropy = []
     
     with torch.no_grad():
@@ -118,11 +119,12 @@ def extract_spline_features(model, inputs, device, batch_size=64):
                 for j, inp in enumerate(batch_inputs):
                     last_pos = len(inp) - 1
                     h_single = h_gate[j:j+1, last_pos:last_pos+1, :]
-                    feats = spline_features_lasttok_softmin(h_single, gate_weight, tau=0.05)
-                    
+                    feats = spline_features_lasttok(h_single, gate_weight, 0.01)
+
+                    per_layer[layer_idx]["hardmin"].append(feats["hardmin"].item())
                     per_layer[layer_idx]["q10"].append(feats["q10"].item())
-                    per_layer[layer_idx]["softmin"].append(feats["softmin"].item())
                     per_layer[layer_idx]["sign_density"].append(feats["sign_density"].item())
+                    per_layer[layer_idx]["lc"].append(feats["lc"].item())
             
             for j, inp in enumerate(batch_inputs):
                 last_pos = len(inp) - 1
@@ -136,12 +138,12 @@ def extract_spline_features(model, inputs, device, batch_size=64):
     
     # Convert to numpy
     for layer_idx in range(n_layers):
-        for feat_name in ["q10", "softmin", "sign_density"]:
+        for feat_name in ["hardmin", "q10", "sign_density", "lc"]:
             per_layer[layer_idx][feat_name] = np.array(per_layer[layer_idx][feat_name])
-    
+
     # Aggregated features
     aggregated = {}
-    for feat_name in ["q10", "softmin", "sign_density"]:
+    for feat_name in ["hardmin", "q10", "sign_density", "lc"]:
         stacked = np.stack([per_layer[l][feat_name] for l in range(n_layers)], axis=0)
         aggregated[feat_name] = stacked.mean(axis=0)
     
@@ -231,7 +233,7 @@ def main():
     
     # Extract features
     print("\nExtracting features for ID samples...")
-    id_features = extract_spline_features(model, id_inputs, device, args.batch_size)
+    id_features = extract_spline_features(model, id_inputs,device, args.batch_size)
     
     print("Extracting features for OOD samples...")
     ood_features = extract_spline_features(model, ood_inputs, device, args.batch_size)
@@ -245,7 +247,7 @@ def main():
     print(f"  {'Feature':15s} | {'ID median':>10s} | {'ID std':>10s} | {'OOD median':>10s} | {'OOD std':>10s} | {'p-value':>10s}")
     print(f"  {'-'*15} | {'-'*10} | {'-'*10} | {'-'*10} | {'-'*10} | {'-'*10}")
     
-    for feat_name in ["q10", "softmin", "sign_density"]:
+    for feat_name in ["hardmin", "q10", "sign_density", "lc"]:
         id_vals = id_features["aggregated"][feat_name]
         ood_vals = ood_features["aggregated"][feat_name]
         
@@ -264,20 +266,21 @@ def main():
     
     # Per-layer analysis
     print(f"\nPer-layer comparison (ID mean → OOD mean):")
-    print(f"  {'Layer':<8} | {'q10':>20s} | {'softmin':>20s} | {'sign_density':>20s}")
-    print(f"  {'-'*8} | {'-'*20} | {'-'*20} | {'-'*20}")
+    print(f"  {'Layer':<8} | {'hardmin':>20s} | {'q10':>20s} | {'sign_density':>20s} | {'lc':>20s}")
+    print(f"  {'-'*8} | {'-'*20} | {'-'*20} | {'-'*20} | {'-'*20}")
 
     for l in range(id_features["n_layers"]):
+        hm_diff = f"{id_features['per_layer'][l]['hardmin'].mean():.3f} → {ood_features['per_layer'][l]['hardmin'].mean():.3f}"
         q10_diff = f"{id_features['per_layer'][l]['q10'].mean():.3f} → {ood_features['per_layer'][l]['q10'].mean():.3f}"
-        sm_diff = f"{id_features['per_layer'][l]['softmin'].mean():.3f} → {ood_features['per_layer'][l]['softmin'].mean():.3f}"
         sd_diff = f"{id_features['per_layer'][l]['sign_density'].mean():.3f} → {ood_features['per_layer'][l]['sign_density'].mean():.3f}"
-        print(f"  Layer {l:<2} | {q10_diff:>20s} | {sm_diff:>20s} | {sd_diff:>20s}")
+        lc_diff = f"{id_features['per_layer'][l]['lc'].mean():.3f} → {ood_features['per_layer'][l]['lc'].mean():.3f}"
+        print(f"  Layer {l:<2} | {hm_diff:>20s} | {q10_diff:>20s} | {sd_diff:>20s} | {lc_diff:>20s}")
     
     # Plot
     if args.plot or args.plot_path:
-        fig, axes = plt.subplots(3, 1, figsize=(12, 9))
-        
-        feat_names = ["q10", "softmin", "entropy"]
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+        feat_names = ["hardmin", "q10", "lc", "entropy"]
         colors = {"ID": "tab:blue", "OOD": "tab:red"}
         
         for ax, feat_name in zip(axes.flat, feat_names):
@@ -289,8 +292,14 @@ def main():
                 ood_vals = ood_features["aggregated"][feat_name]
             
             # Histogram comparison
-            ax.hist(id_vals, bins=30, alpha=0.6, label=f"ID (Dyck 2-{args.k_train})", color=colors["ID"], density=True)
-            ax.hist(ood_vals, bins=30, alpha=0.6, label=f"OOD (Dyck {args.k_train+1}-{args.k_test})", color=colors["OOD"], density=True)
+            if feat_name == "lc":
+                lo = min(id_vals.min(), ood_vals.min())
+                hi = max(id_vals.max(), ood_vals.max())
+                bins = np.arange(int(lo), int(hi) + 2) - 0.5
+            else:
+                bins = 30
+            ax.hist(id_vals, bins=bins, alpha=0.6, label=f"ID (Dyck 2-{args.k_train})", color=colors["ID"], density=True)
+            ax.hist(ood_vals, bins=bins, alpha=0.6, label=f"OOD (Dyck {args.k_train+1}-{args.k_test})", color=colors["OOD"], density=True)
             ax.axvline(id_vals.mean(), color=colors["ID"], linestyle='--', linewidth=2)
             ax.axvline(ood_vals.mean(), color=colors["OOD"], linestyle='--', linewidth=2)
             ax.set_xlabel(feat_name)

@@ -25,34 +25,23 @@ def attach_gate_hooks(model):
 
 
 @torch.no_grad()
-def spline_features_lasttok_softmin(
+def spline_features_lasttok(
     h_gate: torch.Tensor,       # [B,T,K]
     gate_weight: torch.Tensor,  # [K,D]
-    tau: float = 0.05,
+    r: float = 0.005,
     eps: float = 1e-12,
 ):
-    """
+    w_norm = gate_weight.norm(2, dim=1).clamp_min(eps)
+    d = h_gate[:, -1, :].abs() / w_norm.view(1, -1)
 
-    Returns a dict of [B] tensors.
-    """
-    w_norm = gate_weight.norm(2, dim=1).clamp_min(eps)  # [K]
-    d = h_gate[:, -1, :].abs() / w_norm.view(1, -1)     # [B,K]
-
-    tau_t = max(float(tau), 1e-8)
-    softmin_weights = torch.nn.Softmin(dim=1)(d / tau_t)  # [B,K]
-    softmin = (softmin_weights * d).sum(dim=1)  # [B]
-
+    hardmin = d.amin(dim=1)
     q10 = torch.quantile(d, 0.10, dim=1)
-    q50 = torch.quantile(d, 0.50, dim=1)
     sign_density = (h_gate[:, -1, :] > 0).float().mean(dim=1)
+    lc = (d < r).float().sum(dim=1)
 
     return {
-        "softmin": softmin,
+        "hardmin": hardmin,
         "q10": q10,
-        "q50": q50,
         "sign_density": sign_density,
+        "lc": lc,
     }
-
-@torch.no_grad()
-def create_hulls():
-    pass
