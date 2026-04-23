@@ -1,0 +1,16 @@
+verify what experiments need to be done, and which have done. Request jobs for all remaining. 
+
+
+
+          Model | Mistral7b | stable12b
+----------------------------------------
+Dataset
+----------------------------------------
+TriviaQA
+----------------------------------------
+COQA
+----------------------------------------
+MMLU
+----------------------------------------
+GSM8K
+----------------------------------------
