@@ -18,7 +18,7 @@ def main():
     T = 64
     steps = 6000
     batch_size = 256
-    L_min, L_max = 6, 48
+    L_min, L_max = 6, 49
 
     model.train()
     pbar = tqdm(range(steps))

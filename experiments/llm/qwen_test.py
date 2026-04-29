@@ -170,7 +170,7 @@ def save_results(man, correctness, args, output_path="results.json"):
         "per_sample": [],
     }
 
-    # Compute metrics ourselves from raw scores
+
     for key, value in man.estimations.items():
         level, estimator_name = key
         ue_scores = np.array(value)
