@@ -13,7 +13,7 @@ def main():
     n_bins = 8
 
     model = TinySeqTransformerFreq(d_model=64, n_heads=4, d_ff=512, n_layers=4, max_len=128, n_bins=n_bins).to(device)
-    model.load_state_dict(torch.load("models/100_steps_ckpt_sine_freq.pt", map_location=device))
+    model.load_state_dict(torch.load("models/ckpt_sine_freq.pt", map_location=device))
     model.eval()
 
     B = 4096//4
@@ -63,14 +63,16 @@ def main():
     print(f"correlation between acc and sign density: {pearsonr(accs, sds)}")
     print(f"correlation between acc and lc: {spearmanr(accs, lcs)}")
     print(f"correlation between acc and entropy: {pearsonr(accs, entropies)}")
-    fig, axes = plt.subplots(5, 1, figsize=(7, 16))
-    for ax, vals, name in zip(axes, [hardmins, q10s, sds, lcs, entropies],
-                               ["hardmin", "q10", "sign density", "lc", "entropy"]):
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    axes = axes.flatten()
+    for ax, vals, name in zip(axes, [hardmins, q10s, lcs, entropies, accs],
+                               ["hardmin", "q10", "local complexity (r=0.005)", "entropy", "accuracy"]):
         ax.plot(Ls, vals, marker="o")
         ax.set_xlabel("Prefix length L")
         ax.set_ylabel(name)
         ax.set_title(name)
         ax.grid(True)
+    axes[-1].set_visible(False)
     plt.tight_layout()
     plt.savefig("figures/sine_freq_features_vs_prefix_length2.png")
     plt.show()
