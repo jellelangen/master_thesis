@@ -1,8 +1,6 @@
 """
 Dyck-k Probabilistic Context-Free Grammar (PCFG) Generator.
 
-Based on the formulation from "Physics of Language Models: Part 1" (arXiv:2305.13673).
-
 The Dyck-k grammar generates balanced parentheses with k bracket types.
 Production rules:
     S → ε           with probability p_close
