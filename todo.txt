@@ -14,3 +14,12 @@ MMLU            |    x      |
 ----------------------------------------
 GSM8K
 ----------------------------------------
+
+
+Make plot to see which layer performs best.
+
+See if there is one layer per model that is better
+
+Compare this in a table to existing methods(?)
+
+
