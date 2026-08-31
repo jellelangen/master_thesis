@@ -228,7 +228,6 @@ class DyckPCFG:
             # Ignore other characters
         return len(stack) == 0
     
-    # Special token IDs
     PAD_ID = 0
     BOS_ID = 1
     EOS_ID = 2

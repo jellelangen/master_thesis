@@ -1,32 +1,10 @@
 """
 Mixed Dyck evaluation: samples from Dyck-2 through Dyck-k evaluated on a single model.
 
-THEORY:
-    By sampling from multiple Dyck grammars (Dyck-2, Dyck-3, ..., Dyck-k), we get prefixes
-    with varying levels of aleatoric uncertainty:
-    - Dyck-2 prefix: 2-3 valid next tokens
-    - Dyck-4 prefix: 4-5 valid next tokens
-    - Dyck-8 prefix: 8-9 valid next tokens
-    
-    This allows testing whether spline features scale with the number of valid options.
-    The model should be trained with --mixed flag to see all grammars during training.
-
-RELEVANT FILES:
-    - experiments/dyk/train.py: Use --mixed --k=8 for training
-    - architectures/utils.py: spline_features_lasttok function
-    - experiments/dyk/evaluate_uncertainty.py: Single-k version
-
-CLI ARGUMENTS:
-    --checkpoint      Path to model checkpoint (default: models/dyck8.pt)
-    --max_k           Maximum k for Dyck grammars to sample (default: 8)
-    --n_samples_per_k Samples per grammar (default: 200)
-    --batch_size      Batch size for inference (default: 64)
-    --seed            Random seed (default: 54321)
-    --plot            Show plots
-    --plot_path       Save plots to file
-    --layer           Layer to analyze: 'all' for aggregated, or layer index (default: all)
-
 USAGE:
+    #train mixed model
+    python -m experiments.dyk.train --k=8 --mixed --save_path="models/dyck_mixed.pt"
+
     python -m experiments.dyk.evaluate_mixed --checkpoint=models/dyck_mixed.pt --max_k=8 --plot
 """
 
@@ -35,13 +13,76 @@ import torch
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
-from scipy.stats import spearmanr, pearsonr
+from scipy.stats import spearmanr, pearsonr, gaussian_kde
 import matplotlib.pyplot as plt
 
 from data.dyk import DyckPCFG
 from architectures.transformers import SplineTransformer
 from architectures.utils import attach_gate_hooks, spline_features_lasttok
+def kde_quantile_band_flat(xvals, yvals, quantiles=(0.25, 0.5, 0.75),
+                           bw_adjust=1.0, n_sub=5000, n_grid_x=160,
+                           n_grid_y=400, pad_sigma=4.0, log_space=False,
+                           seed=0):
+    """
+    Fit one 2D Gaussian KDE to the (n_valid, value) cloud and read the
+    conditional quantiles off it, column by column.
 
+    Returns grid_x, an array of shape [len(quantiles), n_grid_x], and the
+    bandwidth in data units. Use log_space=True for non-negative, right-skewed
+    quantities such as hardmin, otherwise the recovered quantiles are biased
+    upward by mass leaking below zero.
+    """
+    xvals = np.asarray(xvals, dtype=float)
+    yvals = np.asarray(yvals, dtype=float)
+
+    rng = np.random.default_rng(seed)
+    if len(xvals) > n_sub:
+        keep = rng.choice(len(xvals), size=n_sub, replace=False)
+        xvals = xvals[keep]
+        yvals = yvals[keep]
+
+
+
+    kde = gaussian_kde(np.vstack([xvals, yvals]))
+    kde.set_bandwidth(bw_method=kde.factor * bw_adjust)
+    sigma = np.sqrt(np.diag(kde.covariance))
+
+    grid_x = np.linspace(xvals.min(), xvals.max(), n_grid_x)
+    grid_y = np.linspace(yvals.min() - pad_sigma * sigma[1],
+                         yvals.max() + pad_sigma * sigma[1], n_grid_y)
+    mesh_x, mesh_y = np.meshgrid(grid_x, grid_y)
+    density = kde(np.vstack([mesh_x.ravel(), mesh_y.ravel()])).reshape(mesh_y.shape)
+
+    cdf = np.cumsum(density, axis=0)
+    cdf = cdf / cdf[-1]
+    curves = np.zeros((len(quantiles), len(grid_x)))
+    for qindex in range(len(quantiles)):
+        for col in range(len(grid_x)):
+            curves[qindex, col] = np.interp(quantiles[qindex], cdf[:, col], grid_y)
+
+
+
+    return grid_x, curves, sigma
+
+
+def acc_band(xvals, correct, levels, z_score=1.96):
+    """Per-bin proportion correct with a Wilson interval."""
+    mid = np.zeros(len(levels))
+    low = np.zeros(len(levels))
+    high = np.zeros(len(levels))
+    for col in range(len(levels)):
+        selected = correct[xvals == levels[col]]
+        prop = selected.mean()
+        num = float(len(selected))
+        zsq = z_score ** 2
+        den = 1.0 + zsq / num
+        centre = (prop + zsq / (2.0 * num)) / den
+        spread = z_score / den * np.sqrt(prop * (1.0 - prop) / num
+                                         + zsq / (4.0 * num ** 2))
+        mid[col] = prop
+        low[col] = centre - spread
+        high[col] = centre + spread
+    return mid, low, high
 
 def get_valid_next_tokens_for_k(k: int, prefix_str: str, pcfg: DyckPCFG) -> set:
     """
@@ -80,7 +121,7 @@ def create_mixed_test_set(max_k: int, n_samples_per_k: int, min_len: int = 4, ma
     """
     Generate test samples from Dyck-2 through Dyck-max_k.
     
-    Uses Dyck-max_k PCFG for tokenization (superset vocabulary).
+    Uses Dyck-max_k PCFG for tokenization .
     
     Returns:
         inputs: list of token lists
@@ -127,15 +168,56 @@ def create_mixed_test_set(max_k: int, n_samples_per_k: int, min_len: int = 4, ma
     return inputs, n_valid, k_values, prefix_strs
 
 
+def create_balanced_test_set(max_k: int, n_samples_per_bin: int, min_len: int = 4,
+                             max_len: int = 32, seed: int = 12345):
+    """Generate exactly ``n_samples_per_bin`` examples for every n_valid bin.
+
+    A bin n can be produced by an empty-stack Dyck-n prefix or a non-empty-stack
+    Dyck-(n-1) prefix.  Where both are available, the two grammar/stack-state
+    sources are represented as evenly as possible. 
+    """
+    rng = np.random.default_rng(seed)
+    pcfg_max = DyckPCFG(k=max_k, p_close=0.5, seed=seed)
+    pcfgs = {
+        k: DyckPCFG(k=k, p_close=0.5, seed=seed + k * 1000)
+        for k in range(2, max_k + 1)
+    }
+
+    records = []
+    for target_n_valid in range(2, max_k + 2):
+        source_ks = []
+        if target_n_valid <= max_k:
+            source_ks.append(target_n_valid)      # empty stack
+        if target_n_valid - 1 >= 2:
+            source_ks.append(target_n_valid - 1)  # non-empty stack
+
+        for sample_idx in range(n_samples_per_bin):
+            k = source_ks[sample_idx % len(source_ks)]
+            pcfg_k = pcfgs[k]
+
+            while True:
+                seq = pcfg_k.sample()
+                if len(seq) < min_len or len(seq) > max_len:
+                    continue
+                prefix_len = int(rng.integers(1, len(seq)))
+                prefix_str = seq[:prefix_len]
+                valid = get_valid_next_tokens_for_k(k, prefix_str, pcfg_k)
+                if len(valid) == target_n_valid:
+                    break
+
+            tokens = pcfg_max.tokenize(prefix_str, add_bos=True, add_eos=False)
+            records.append((tokens, target_n_valid, k, prefix_str))
+    # Shuffle samples
+    order = rng.permutation(len(records))
+    records = [records[i] for i in order]
+    inputs, n_valid, k_values, prefix_strs = map(list, zip(*records))
+    return inputs, n_valid, k_values, prefix_strs
+
+
 def extract_spline_features(model, inputs, device, batch_size=64):
     """
     Extract spline features from all layers of the model.
     
-    Returns:
-        dict with:
-            - 'per_layer': {layer_idx: {q10, softmin, sign_density arrays}}
-            - 'aggregated': {q10, softmin, sign_density arrays} (mean across layers)
-            - 'entropy': array (from output logits)
     """
     model.eval()
     handles, cache = attach_gate_hooks(model)
@@ -165,7 +247,7 @@ def extract_spline_features(model, inputs, device, batch_size=64):
                 for j, inp in enumerate(batch_inputs):
                     last_pos = len(inp) - 1
                     h_single = h_gate[j:j+1, last_pos:last_pos+1, :]
-                    feats = spline_features_lasttok(h_single, gate_weight, 0.2)
+                    feats = spline_features_lasttok(h_single, gate_weight, 0.1)
 
                     per_layer[layer_idx]["hardmin"].append(feats["hardmin"].item())
                     per_layer[layer_idx]["q10"].append(feats["q10"].item())
@@ -206,7 +288,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, default="models/dyck8.pt")
     parser.add_argument("--max_k", type=int, default=8, help="Max k for Dyck grammars (samples Dyck-2 to Dyck-max_k)")
-    parser.add_argument("--n_samples_per_k", type=int, default=1000)
+    parser.add_argument("--sampling", choices=["balanced", "natural"], default="balanced",
+                        help="Balance n_valid bins (default) or sample each grammar naturally")
+    parser.add_argument("--n_samples_per_bin", "--n_samples_per_k", dest="n_samples", type=int,
+                        default=1000,
+                        help="Samples per n_valid bin (or per grammar with --sampling natural)")
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--seed", type=int, default=54321)
     parser.add_argument("--plot", action="store_true")
@@ -244,11 +330,19 @@ def main():
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     
-    # Generate mixed test set from Dyck-2 to Dyck-max_k
-    print(f"\nGenerating {args.n_samples_per_k} samples each from Dyck-2 to Dyck-{args.max_k}...")
-    inputs, n_valid, k_values, prefix_strs = create_mixed_test_set(
-        args.max_k, args.n_samples_per_k, seed=args.seed
-    )
+    # Generate mixed test set from Dyck-2 to Dyck-max_k.
+    if args.sampling == "balanced":
+        print(f"\nGenerating {args.n_samples} samples for each n_valid bin "
+              f"from 2 to {args.max_k + 1}...")
+        inputs, n_valid, k_values, prefix_strs = create_balanced_test_set(
+            args.max_k, args.n_samples, seed=args.seed
+        )
+    else:
+        print(f"\nGenerating {args.n_samples} samples each from "
+              f"Dyck-2 to Dyck-{args.max_k} (natural sampling)...")
+        inputs, n_valid, k_values, prefix_strs = create_mixed_test_set(
+            args.max_k, args.n_samples, seed=args.seed
+        )
     
     n_valid = np.array(n_valid)
     k_values = np.array(k_values)
@@ -271,10 +365,7 @@ def main():
         features = result["per_layer"][layer_idx]
         layer_desc = f"layer {layer_idx}"
     
-    # Analysis
-    print(f"\n{'='*70}")
-    print(f"MIXED DYCK UNCERTAINTY ANALYSIS - {layer_desc}")
-    print(f"{'='*70}")
+
     
     print(f"\nSamples by ambiguity level:")
     unique_nvalid = sorted(set(n_valid))
@@ -307,45 +398,84 @@ def main():
     r_sd, _ = spearmanr(n_valid, result["aggregated"]["sign_density"])
     r_lc, _ = spearmanr(n_valid, result["aggregated"]["lc"])
     print(f"  {'Agg':<8} | {r_hm:+10.4f} | {r_q10:+10.4f} | {r_sd:+12.4f} | {r_lc:+10.4f}")
-    
+
+
+    # Also report correlations without the n_valid=2 bin because it seems like a confound.
+    mask_no_two = n_valid >= 3
+    print(f"\nCorrelations with n_valid, excluding n_valid=2 (n={mask_no_two.sum()}):")
+    for feat_name in ["hardmin", "q10", "sign_density", "lc"]:
+        r, p = spearmanr(n_valid[mask_no_two], features[feat_name][mask_no_two])
+        print(f"  {feat_name:15s}: r={r:+.4f} (p={p:.2e})")
+    r, p = spearmanr(n_valid[mask_no_two], result["entropy"][mask_no_two])
+    print(f"  {'entropy':15s}: r={r:+.4f} (p={p:.2e})")
+
+    print(f"\nPer-layer correlations with n_valid (n_valid >= 3):")
+    for l in range(n_layers):
+        layer_feats = result["per_layer"][l]
+        r_q10, _ = spearmanr(n_valid[mask_no_two], layer_feats["q10"][mask_no_two])
+        r_lc, _ = spearmanr(n_valid[mask_no_two], layer_feats["lc"][mask_no_two])
+        print(f"  Layer {l}: q10 r={r_q10:+.4f} | lc r={r_lc:+.4f}")
     # Plot
     if args.plot or args.plot_path:
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        levels = np.array(unique_nvalid, dtype=float)
 
-        # Plot features for selected layer
-        feat_list = ["hardmin", "q10", "lc", "entropy"]
-        for ax, feat_name in zip(axes.flat, feat_list):
-            if feat_name == "entropy":
-                feat_vals = result["entropy"]
+        panel_list = ["hardmin", "q10", "lc", "entropy"]
+        if "valid_mass" in result:
+            panel_list.append("valid_mass")
+        if "correct" in result:
+            panel_list.append("accuracy")
+
+        n_cols = 2
+        n_rows = int(np.ceil(len(panel_list) / n_cols))
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.0 * n_cols, 4.0 * n_rows))
+        axes = np.atleast_1d(axes).flatten()
+
+        for position in range(len(panel_list)):
+            feat_name = panel_list[position]
+            axis = axes[position]
+
+            if feat_name == "accuracy":
+                mid, low, high = acc_band(n_valid, result["correct"], levels)
+                axis.fill_between(levels, low, high, alpha=0.25,
+                                  color="tab:blue", linewidth=0)
+                axis.plot(levels, mid, marker="o", color="tab:blue")
+                axis.set_ylabel("validity accuracy")
             else:
-                feat_vals = features[feat_name]
-
-            means = []
-            stds = []
-            for nv in unique_nvalid:
-                mask = n_valid == nv
-                if mask.sum() > 0:
-                    means.append(feat_vals[mask].mean())
-                    stds.append(feat_vals[mask].std())
+                if feat_name == "entropy":
+                    feat_vals = result["entropy"]
+                elif feat_name == "valid_mass":
+                    feat_vals = result["valid_mass"]
                 else:
-                    means.append(np.nan)
-                    stds.append(np.nan)
+                    feat_vals = features[feat_name]
 
-            means = np.array(means)
-            stds = np.array(stds)
+                grid_x, curves, sigma = kde_quantile_band_flat(n_valid, feat_vals)
+                axis.fill_between(grid_x, curves[0], curves[2], alpha=0.25,
+                                  color="tab:blue", linewidth=0)
 
-            ax.plot(unique_nvalid, means, marker='o', linewidth=2, markersize=8)
-            ax.set_xlabel("number of valid next tokens")
-            ax.set_ylabel(feat_name)
-            ax.set_title(f"{feat_name} ({layer_desc})")
-            ax.set_xticks(unique_nvalid)
-            ax.grid(True, alpha=0.3)
-        
-        plt.suptitle(f"Mixed Dyck-2 to Dyck-{args.max_k} ({layer_desc})", fontsize=12, fontweight='bold')
+                raw_medians = np.zeros(len(levels))
+                for col in range(len(levels)):
+                    raw_medians[col] = np.median(feat_vals[n_valid == levels[col]])
+                axis.plot(levels, raw_medians, marker="o", linestyle="none",
+                          alpha=0.5, color="tab:blue")
+                axis.plot(grid_x, curves[1], color="tab:blue", linewidth=1.8)
+                axis.set_ylabel(feat_name)
+                print("  %-12s bandwidth: %.3f bins, %.4g in value"
+                      % (feat_name, sigma[0], sigma[1]))
+
+            if levels[0] == 2:
+                axis.axvspan(1.5, 2.5, color="0.92", linewidth=0, zorder=0)
+            axis.set_xticks(levels)
+            axis.set_xlabel("number of valid next tokens")
+            axis.grid(True, alpha=0.3)
+
+        for position in range(len(panel_list), len(axes)):
+            axes[position].set_visible(False)
+
+        plt.suptitle(f"Mixed Dyck-2 to Dyck-{args.max_k}", fontsize=12,
+                     fontweight='bold')
         plt.tight_layout()
-        
         if args.plot_path:
-            plt.savefig(args.plot_path, dpi=150, bbox_inches="tight")
+            plt.savefig(args.plot_path, dpi=300, bbox_inches="tight")
             print(f"\nSaved plot to {args.plot_path}")
         
         if args.plot:

@@ -43,7 +43,7 @@ def main():
             pbar.set_description(f"step {step} L={L} loss={loss.item():.4f} acc={acc:.3f}")
     if not os.path.exists("models"):
         os.makedirs("models")
-    torch.save(model.state_dict(), "models/100_steps_ckpt_sine_freq.pt")
+    torch.save(model.state_dict(), "models/ckpt_sine_freq.pt")
     print("saved ckpt_sine_freq.pt")
 
 if __name__ == "__main__":

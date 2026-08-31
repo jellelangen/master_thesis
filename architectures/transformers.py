@@ -97,14 +97,6 @@ class SplineTransformer(nn.Module):
     """
     Autoregressive transformer for discrete token sequences.
     Uses gated MLPs (like Llama) to enable spline feature extraction.
-    
-    For Dyck-k with k bracket types:
-    - vocab_size = 2*k + 1 (PAD=0, open_1..k, close_1..k)
-    
-    Example usage:
-        >>> model = SplineTransformer(vocab_size=5, d_model=64)  # Dyck-2
-        >>> x = torch.randint(1, 5, (batch, seq_len))
-        >>> logits, attn = model(x)  # logits: [B, T, V]
     """
     def __init__(
         self,

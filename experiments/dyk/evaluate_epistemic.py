@@ -1,37 +1,6 @@
 """
-Epistemic uncertainty evaluation for Dyck-k using spline geometry features.
+Uncertainty evaluation for Dyck-k using spline geometry features.
 
-THEORY:
-    Epistemic uncertainty arises from the model's lack of knowledge. We test this by:
-    1. Training on Dyck-2 through Dyck-k_train (in-distribution)
-    2. Evaluating on Dyck-(k_train+1) through Dyck-k_test (out-of-distribution)
-    
-    OOD samples contain bracket types the model has never seen during training.
-    If spline features capture epistemic uncertainty, they should differ between ID and OOD.
-    
-    Features analyzed:
-    - hardmin: Hard minimum distance to hyperplane (distance-based)
-    - q10: 10th percentile distance to hyperplane (distance-based)
-    - sign_density: Fraction of positive activations (activation-based)
-    - lc: Local complexity / number of nearby boundaries (count-based)
-    - entropy: Prediction entropy from output logits
-
-RELEVANT FILES:
-    - experiments/dyk/train.py: Use --mixed --max_k_train=6 for OOD setup
-    - experiments/dyk/classify_ood.py: Binary classifier using these features
-    - architectures/utils.py: Feature extraction functions
-
-CLI ARGUMENTS:
-    --checkpoint    Path to model checkpoint (required)
-    --k_train       Max k seen during training (default: 6)
-    --k_test        Max k for testing, OOD = k_train+1 to k_test (default: 8)
-    --n_samples     Samples per distribution (default: 300)
-    --batch_size    Batch size (default: 64)
-    --seed          Random seed (default: 77777)
-    --plot          Show histogram plots
-    --plot_path     Save plots to file
-
-USAGE:
     # First train with held-out grammars:
     python -m experiments.dyk.train --k=8 --mixed --max_k_train=6 --save_path="models/dyck_2to6.pt"
     
@@ -46,6 +15,7 @@ from pathlib import Path
 from tqdm import tqdm
 from scipy.stats import spearmanr, mannwhitneyu, ttest_ind
 import matplotlib.pyplot as plt
+from sklearn.metrics import roc_auc_score
 
 from data.dyk import DyckPCFG
 from architectures.transformers import SplineTransformer
@@ -119,7 +89,7 @@ def extract_spline_features(model, inputs, device, batch_size=64):
                 for j, inp in enumerate(batch_inputs):
                     last_pos = len(inp) - 1
                     h_single = h_gate[j:j+1, last_pos:last_pos+1, :]
-                    feats = spline_features_lasttok(h_single, gate_weight, 0.01)
+                    feats = spline_features_lasttok(h_single, gate_weight, 0.1)
 
                     per_layer[layer_idx]["hardmin"].append(feats["hardmin"].item())
                     per_layer[layer_idx]["q10"].append(feats["q10"].item())
@@ -160,7 +130,7 @@ def main():
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--k_train", type=int, default=6, help="Max k seen during training")
     parser.add_argument("--k_test", type=int, default=8, help="Max k for testing (k_train+1 to k_test are OOD)")
-    parser.add_argument("--n_samples", type=int, default=300)
+    parser.add_argument("--n_samples", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--seed", type=int, default=77777)
     parser.add_argument("--plot", action="store_true")
@@ -232,16 +202,11 @@ def main():
     print(f"ID samples: {len(id_inputs)}, OOD samples: {len(ood_inputs)}")
     
     # Extract features
-    print("\nExtracting features for ID samples...")
     id_features = extract_spline_features(model, id_inputs,device, args.batch_size)
     
-    print("Extracting features for OOD samples...")
+  
     ood_features = extract_spline_features(model, ood_inputs, device, args.batch_size)
-    
-    # Analysis
-    print(f"\n{'='*70}")
-    print("EPISTEMIC UNCERTAINTY ANALYSIS: ID vs OOD")
-    print(f"{'='*70}")
+  
     
     print(f"\nFeature comparison (aggregated across layers):")
     print(f"  {'Feature':15s} | {'ID median':>10s} | {'ID std':>10s} | {'OOD median':>10s} | {'OOD std':>10s} | {'p-value':>10s}")
@@ -252,16 +217,35 @@ def main():
         ood_vals = ood_features["aggregated"][feat_name]
         
         # Mann-Whitney U test (non-parametric)
-        stat, pval = mannwhitneyu(id_vals, ood_vals, alternative='greater')
+        stat, pval = mannwhitneyu(id_vals, ood_vals, alternative='two-sided')
         # T-test (parametric)
-        stat_t, pval_t = ttest_ind(id_vals, ood_vals, alternative='greater')
+        stat_t, pval_t = ttest_ind(id_vals, ood_vals, alternative='two-sided')
         
         print(f"  {feat_name:15s} | {np.median(id_vals):10.4f} | {id_vals.std():10.4f} | {np.median(ood_vals):10.4f} | {ood_vals.std():10.4f} | {pval:10.2e} | stat={stat:.2f} | pval_t={pval_t:10.2e} | stat_t={stat_t:.2f}")
     
     # Entropy
-    stat, pval = mannwhitneyu(id_features["entropy"], ood_features["entropy"], alternative='less')
-    stat_t, pval_t = ttest_ind(id_features["entropy"], ood_features["entropy"], alternative='less')
-    
+    stat, pval = mannwhitneyu(id_features["entropy"], ood_features["entropy"], alternative='two-sided')
+    stat_t, pval_t = ttest_ind(id_features["entropy"], ood_features["entropy"], alternative='two-sided')
+    from sklearn.metrics import roc_auc_score
+
+    # ROCAUC per feature: labels ID=0, OOD=1.
+    # AUC > 0.5 means higher feature value indicates OOD; we report the
+    # orientation-corrected max(auc, 1-auc) plus the direction.
+    print(f"\nROCAUC for ID vs OOD detection (orientation-corrected):")
+    labels = np.concatenate([np.zeros(len(id_features["entropy"])),
+                            np.ones(len(ood_features["entropy"]))])
+
+    for feat_name in ["hardmin", "q10", "sign_density", "lc"]:
+        scores = np.concatenate([id_features["aggregated"][feat_name],
+                                ood_features["aggregated"][feat_name]])
+        auc = roc_auc_score(labels, scores)
+        direction = "higher=OOD" if auc >= 0.5 else "lower=OOD"
+        print(f"  {feat_name:15s}: AUC={max(auc, 1-auc):.3f} ({direction}, raw={auc:.3f})")
+
+    scores = np.concatenate([id_features["entropy"], ood_features["entropy"]])
+    auc = roc_auc_score(labels, scores)
+    direction = "higher=OOD" if auc >= 0.5 else "lower=OOD"
+    print(f"  {'entropy':15s}: AUC={max(auc, 1-auc):.3f} ({direction}, raw={auc:.3f})")
     print(f"  {'entropy':15s} | {np.median(id_features['entropy']):10.4f} | {id_features['entropy'].std():10.4f} | {np.median(ood_features['entropy']):10.4f} | {ood_features['entropy'].std():10.4f} | {pval:10.2e} | stat={stat:.2f} | pval_t={pval_t:10.2e} | stat_t={stat_t:.2f}")
     
     # Per-layer analysis
@@ -308,12 +292,12 @@ def main():
             ax.legend()
             ax.grid(True, alpha=0.3)
         
-        plt.suptitle(f"Epistemic Uncertainty: ID (Dyck 2-{args.k_train}) vs OOD (Dyck {args.k_train+1}-{args.k_test})", 
+        plt.suptitle(f"OOD Detection: ID (Dyck 2-{args.k_train}) vs OOD (Dyck {args.k_train+1}-{args.k_test})", 
                      fontsize=12, fontweight='bold')
         plt.tight_layout()
         
         if args.plot_path:
-            plt.savefig(args.plot_path, dpi=150, bbox_inches="tight")
+            plt.savefig(args.plot_path, dpi=300, bbox_inches="tight")
             print(f"\nSaved plot to {args.plot_path}")
         
         if args.plot:

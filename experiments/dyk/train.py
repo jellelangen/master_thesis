@@ -1,16 +1,7 @@
 """
 Training script for SplineTransformer on Dyck-k sequences.
 
-THEORY:
-    Dyck-k languages consist of k types of properly matched brackets (e.g., Dyck-2 = "()" and "[]").
-    The model is trained with an autoregressive language modeling objective: given a prefix,
-    predict the next token. This is a structured prediction task where the grammar constrains
-    valid continuations.
-    
-    The SplineTransformer uses gated MLPs which partition the input space into linear regions.
-    This script trains the model and saves checkpoints for later analysis of the spline geometry.
-
-RELEVANT FILES:
+relevant files:
     - data/dyk/dyk.py: DyckPCFG class for sequence generation and tokenization
     - architectures/transformers.py: SplineTransformer model architecture
     - experiments/dyk/evaluate.py: Basic evaluation of trained models
@@ -36,15 +27,6 @@ CLI ARGUMENTS:
     --mixed         Train on mixed Dyck-2 through Dyck-k (samples from all grammar variants)
     --max_k_train   Max k to use in mixed training (default: k). Set lower for OOD evaluation.
 
-USAGE:
-    # Basic training on Dyck-2
-    python -m experiments.dyk.train --k=2 --steps=4000
-    
-    # Mixed training on Dyck-2 through Dyck-8
-    python -m experiments.dyk.train --k=8 --mixed --steps=5000 --save_path="models/dyck_mixed.pt"
-    
-    # Training for epistemic uncertainty (hold out Dyck-7,8)
-    python -m experiments.dyk.train --k=8 --mixed --max_k_train=6 --save_path="models/dyck_2to6.pt"
 """
 
 import argparse
@@ -228,7 +210,7 @@ def main():
     parser.add_argument("--d_model", type=int, default=64)
     parser.add_argument("--n_heads", type=int, default=4)
     parser.add_argument("--d_ff", type=int, default=256)
-    parser.add_argument("--n_layers", type=int, default=2)
+    parser.add_argument("--n_layers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--k", type=int, default=2, help="Number of bracket types")
     parser.add_argument("--p_close", type=float, default=0.5)
